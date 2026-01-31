@@ -2,7 +2,7 @@
 
 A command-line utility to export notes from Apple Notes.app on macOS.
 
-This was vibe coded for my personal use. I don't expect anyone else to be interested in it, but everyone is welcome to use it.
+This was vibe coded by BluePill Software for personal use. I don't expect anyone else to be interested in it, but everyone is welcome to use it.
 
 ## How it works
 
@@ -54,4 +54,4 @@ The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app throu
 
 ## License
 
-This project is licensed under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+Copyright BluePill Software. This project is licensed under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
