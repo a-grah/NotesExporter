@@ -6,7 +6,7 @@ This was vibe coded by BluePill Software for personal use. I don't expect anyone
 
 ## How it works
 
-The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app through its scripting interface. It fetches the list of all notes across every account and folder, lets you filter and select the ones you want, then pulls the content of each selected note and writes it to a file. Notes can be exported as raw HTML, plain text, or a basic Markdown conversion.
+The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app through its scripting interface. It fetches the list of all notes across every account and folder, lets you filter and select the ones you want, then pulls the content of each selected note and writes it to a file. Notes can be exported as Markdown (default), raw HTML, plain text, or PDF (via `wkhtmltopdf`).
 
 ## Usage
 
@@ -18,7 +18,7 @@ The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app throu
 
 | Flag | Description |
 |------|-------------|
-| `-f FORMAT` | Output format: `html`, `txt`, or `md` (default: `html`) |
+| `-f FORMAT` | Output format: `md`, `html`, `txt`, or `pdf` (default: `md`) |
 | `-o DIR` | Output directory (default: `./exported-notes`) |
 | `-a ACCOUNT` | Filter by account name (e.g. `iCloud`) |
 | `-F FOLDER` | Filter by folder name |
@@ -28,11 +28,11 @@ The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app throu
 ### Examples
 
 ```bash
-# Interactive mode — browse and pick notes to export
+# Interactive mode — browse and pick notes to export (default: markdown)
 ./export-notes.sh
 
-# Export as markdown
-./export-notes.sh -f md
+# Export as PDF
+./export-notes.sh -f pdf
 
 # Export notes with "recipe" in the title
 ./export-notes.sh -r "recipe"
@@ -51,6 +51,7 @@ The script uses macOS JavaScript for Automation (JXA) to talk to Notes.app throu
 
 - macOS
 - Notes.app (launches automatically if not running)
+- [`wkhtmltopdf`](https://wkhtmltopdf.org/) — required only for PDF export (`brew install wkhtmltopdf`)
 
 ## License
 

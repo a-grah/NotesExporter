@@ -4,10 +4,10 @@ set -euo pipefail
 # export-notes.sh — Export selected notes from Apple Notes.app
 # Usage: ./export-notes.sh [-f format] [-o outdir] [-a account] [-F folder] [-r regex]
 #
-# Formats: html (default), txt, md
+# Formats: md (default), html, txt, pdf
 # Notes.app must be running or will be launched automatically by osascript.
 
-FORMAT="html"
+FORMAT="md"
 OUTDIR="./exported-notes"
 ACCOUNT=""
 FOLDER=""
@@ -18,7 +18,7 @@ usage() {
 Usage: $(basename "$0") [options]
 
 Options:
-  -f FORMAT   Output format: html, txt, md (default: html)
+  -f FORMAT   Output format: md, html, txt, pdf (default: md)
   -o DIR      Output directory (default: ./exported-notes)
   -a ACCOUNT  Filter by account name (e.g. "iCloud")
   -F FOLDER   Filter by folder name
@@ -40,8 +40,15 @@ while getopts "f:o:a:F:r:h" opt; do
     esac
 done
 
-if [[ "$FORMAT" != "html" && "$FORMAT" != "txt" && "$FORMAT" != "md" ]]; then
-    echo "Error: format must be html, txt, or md" >&2
+if [[ "$FORMAT" != "html" && "$FORMAT" != "txt" && "$FORMAT" != "md" && "$FORMAT" != "pdf" ]]; then
+    echo "Error: format must be md, html, txt, or pdf" >&2
+    exit 1
+fi
+
+# Check for wkhtmltopdf if PDF format requested
+if [[ "$FORMAT" == "pdf" ]] && ! command -v wkhtmltopdf &>/dev/null; then
+    echo "Error: 'wkhtmltopdf' is required for PDF export but was not found." >&2
+    echo "Install it with: brew install wkhtmltopdf" >&2
     exit 1
 fi
 
@@ -84,14 +91,11 @@ fi
 # ── Step 2: Apply filters ───────────────────────────────────────────────────
 
 FILTERED=""
-while IFS= read -r line; do
-    acct=$(echo "$line" | cut -f1)
-    fldr=$(echo "$line" | cut -f2)
-    name=$(echo "$line" | cut -f3)
+while IFS=$'\t' read -r acct fldr name rest; do
     if [[ -n "$ACCOUNT" && "$acct" != "$ACCOUNT" ]]; then continue; fi
     if [[ -n "$FOLDER" && "$fldr" != "$FOLDER" ]]; then continue; fi
-    if [[ -n "$REGEX" ]] && ! echo "$name" | grep -qE "$REGEX"; then continue; fi
-    FILTERED+="$line"$'\n'
+    if [[ -n "$REGEX" && ! "$name" =~ $REGEX ]]; then continue; fi
+    FILTERED+="${acct}"$'\t'"${fldr}"$'\t'"${name}"$'\t'"${rest}"$'\n'
 done <<< "$NOTE_LIST"
 
 FILTERED="${FILTERED%$'\n'}"  # trim trailing newline
@@ -110,12 +114,8 @@ printf "%-5s  %-15s  %-20s  %-12s  %s\n" "---" "---------------" "--------------
 IDX=1
 declare -a NOTE_IDS
 declare -a NOTE_NAMES
-while IFS= read -r line; do
-    acct=$(echo "$line" | cut -f1)
-    fldr=$(echo "$line" | cut -f2)
-    name=$(echo "$line" | cut -f3)
-    moddate=$(echo "$line" | cut -f4 | cut -c1-10)
-    nid=$(echo "$line" | cut -f5)
+while IFS=$'\t' read -r acct fldr name moddate nid; do
+    moddate="${moddate:0:10}"
     printf "%-5s  %-15s  %-20s  %-12s  %s\n" "$IDX" "$acct" "$fldr" "$moddate" "$name"
     NOTE_IDS+=("$nid")
     NOTE_NAMES+=("$name")
@@ -185,73 +185,94 @@ mkdir -p "$OUTDIR"
 echo ""
 echo "Exporting ${#SELECTED[@]} note(s) as $FORMAT to $OUTDIR/ ..."
 
+# Determine extension and body field (fixed for the whole run)
+case "$FORMAT" in
+    html) ext="html"; BODY_FIELD="htmlBody" ;;
+    txt)  ext="txt";  BODY_FIELD="plaintext" ;;
+    md)   ext="md";   BODY_FIELD="htmlBody" ;;
+    pdf)  ext="pdf";  BODY_FIELD="htmlBody" ;;
+esac
+
+# Pre-compute IDs and sanitised filenames for all selected notes
+declare -a BATCH_IDS=()
+declare -a BATCH_RAW_NAMES=()
+declare -a BATCH_SAFE_NAMES=()
 for idx in "${SELECTED[@]}"; do
-    nid="${NOTE_IDS[$((idx-1))]}"
+    BATCH_IDS+=("${NOTE_IDS[$((idx-1))]}")
     raw_name="${NOTE_NAMES[$((idx-1))]}"
-    # Sanitise filename
-    safe_name=$(echo "$raw_name" | sed 's/[\/\\:*?"<>|]/_/g' | sed 's/^\.*//' | head -c 200)
-    if [[ -z "$safe_name" ]]; then safe_name="untitled"; fi
+    BATCH_RAW_NAMES+=("$raw_name")
+    safe_name="${raw_name//[\/\\:*?"<>|]/_}"
+    while [[ "$safe_name" == .* ]]; do safe_name="${safe_name#.}"; done
+    safe_name="${safe_name:0:200}"
+    [[ -z "$safe_name" ]] && safe_name="untitled"
+    BATCH_SAFE_NAMES+=("$safe_name")
+done
 
-    case "$FORMAT" in
-        html)
-            ext="html"
-            body_field="htmlBody"
-            ;;
-        txt)
-            ext="txt"
-            body_field="plaintext"
-            ;;
-        md)
-            ext="md"
-            body_field="htmlBody"
-            ;;
-    esac
+# Write IDs to a temp file; fetch all content in a single osascript call.
+# Entries in the output are joined with ASCII RS (0x1E) for safe splitting.
+TMPIDS=$(mktemp /tmp/note_ids_XXXXXX.txt)
+printf '%s\n' "${BATCH_IDS[@]}" > "$TMPIDS"
 
-    CONTENT=$(osascript -l JavaScript - "$nid" "$body_field" <<'ENDJS'
-const args = $.NSProcessInfo.processInfo.arguments;
-const noteId = ObjC.unwrap(args.objectAtIndex(4));
-const field = ObjC.unwrap(args.objectAtIndex(5));
+BATCH_CONTENT=$(osascript -l JavaScript - "$TMPIDS" "$BODY_FIELD" <<'ENDJS'
+ObjC.import('Foundation');
+const args  = $.NSProcessInfo.processInfo.arguments;
+const idsFile = ObjC.unwrap(args.objectAtIndex(4));
+const field   = ObjC.unwrap(args.objectAtIndex(5));
+
+const raw = $.NSString.alloc.initWithDataEncoding(
+    $.NSData.dataWithContentsOfFile(idsFile),
+    $.NSUTF8StringEncoding
+);
+const noteIds = ObjC.unwrap(raw).trim().split('\n').filter(id => id.length > 0);
 
 const Notes = Application("Notes");
-const allNotes = Notes.notes.whose({id: noteId})();
-if (allNotes.length === 0) {
-    "";
-} else {
-    const note = allNotes[0];
-    if (field === "plaintext") {
-        note.plaintext();
+const results = [];
+for (const noteId of noteIds) {
+    const matches = Notes.notes.whose({id: noteId})();
+    if (matches.length === 0) {
+        results.push("");
     } else {
-        note.body();
+        const note = matches[0];
+        results.push(field === "plaintext" ? note.plaintext() : note.body());
     }
 }
+results.join("\x1e");
 ENDJS
-    )
+)
+rm -f "$TMPIDS"
 
-    # For markdown output, convert HTML to a rough markdown
+# Process and write each note; split BATCH_CONTENT on ASCII RS (0x1E)
+i=0
+while IFS= read -r -d $'\x1e' CONTENT || [[ -n "$CONTENT" ]]; do
+    raw_name="${BATCH_RAW_NAMES[$i]}"
+    safe_name="${BATCH_SAFE_NAMES[$i]}"
+    i=$(( i + 1 ))
+
+    # For markdown output, convert HTML to rough markdown in a single sed pass
     if [[ "$FORMAT" == "md" ]]; then
-        CONTENT=$(echo "$CONTENT" \
-            | sed 's/<br[^>]*>/\n/gi' \
-            | sed 's/<\/p>/\n\n/gi' \
-            | sed 's/<\/h1>/\n\n/gi' \
-            | sed 's/<\/h2>/\n\n/gi' \
-            | sed 's/<\/h3>/\n\n/gi' \
-            | sed 's/<h1[^>]*>/# /gi' \
-            | sed 's/<h2[^>]*>/## /gi' \
-            | sed 's/<h3[^>]*>/### /gi' \
-            | sed 's/<\/li>/\n/gi' \
-            | sed 's/<li[^>]*>/- /gi' \
-            | sed 's/<strong[^>]*>/\*\*/gi' \
-            | sed 's/<\/strong>/\*\*/gi' \
-            | sed 's/<em[^>]*>/\*/gi' \
-            | sed 's/<\/em>/\*/gi' \
-            | sed 's/<[^>]*>//g' \
-            | sed '/^[[:space:]]*$/{ N; /^\n[[:space:]]*$/d; }' \
+        CONTENT=$(echo "$CONTENT" | sed \
+            -e 's/<br[^>]*>/\n/gi' \
+            -e 's/<\/p>/\n\n/gi' \
+            -e 's/<\/h1>/\n\n/gi' \
+            -e 's/<\/h2>/\n\n/gi' \
+            -e 's/<\/h3>/\n\n/gi' \
+            -e 's/<h1[^>]*>/# /gi' \
+            -e 's/<h2[^>]*>/## /gi' \
+            -e 's/<h3[^>]*>/### /gi' \
+            -e 's/<\/li>/\n/gi' \
+            -e 's/<li[^>]*>/- /gi' \
+            -e 's/<strong[^>]*>/\*\*/gi' \
+            -e 's/<\/strong>/\*\*/gi' \
+            -e 's/<em[^>]*>/\*/gi' \
+            -e 's/<\/em>/\*/gi' \
+            -e 's/<[^>]*>//g' \
+            -e '/^[[:space:]]*$/{ N; /^\n[[:space:]]*$/d; }' \
         )
     fi
 
     OUTFILE="$OUTDIR/${safe_name}.${ext}"
 
-    # Avoid clobbering: append number if file exists
+    # Avoid clobbering: append a counter if the file already exists
     if [[ -e "$OUTFILE" ]]; then
         counter=2
         while [[ -e "$OUTDIR/${safe_name}_${counter}.${ext}" ]]; do
@@ -260,9 +281,16 @@ ENDJS
         OUTFILE="$OUTDIR/${safe_name}_${counter}.${ext}"
     fi
 
-    echo "$CONTENT" > "$OUTFILE"
+    if [[ "$FORMAT" == "pdf" ]]; then
+        TMPFILE=$(mktemp /tmp/note_XXXXXX.html)
+        echo "$CONTENT" > "$TMPFILE"
+        wkhtmltopdf --quiet "$TMPFILE" "$OUTFILE"
+        rm -f "$TMPFILE"
+    else
+        echo "$CONTENT" > "$OUTFILE"
+    fi
     echo "  ✓ $raw_name → $(basename "$OUTFILE")"
-done
+done <<< "$BATCH_CONTENT"
 
 echo ""
 echo "Done. Files saved to $OUTDIR/"
