@@ -22,6 +22,22 @@ The shell script is kept as a reference implementation.
 
 Both versions fetch the list of all notes across every account and folder, let you filter and select the ones you want, then pull the content of each selected note and write it to a file. Notes can be exported as Markdown (default), raw HTML, plain text, or PDF (via `wkhtmltopdf`).
 
+## Download
+
+Pre-built binaries are attached to each [GitHub release](https://github.com/a-grah/NotesExporter/releases):
+
+| File | Description |
+|------|-------------|
+| `export-notes` | Compiled Swift binary (macOS, Apple Silicon) |
+| `export-notes.sh` | Bash script (no build required) |
+
+Download the release assets, make them executable, and run:
+
+```bash
+chmod +x export-notes export-notes.sh
+./export-notes -v
+```
+
 ## Building the Swift version
 
 ```bash
