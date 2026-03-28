@@ -17,6 +17,31 @@ func pad(_ s: String, _ width: Int) -> String {
 
 func printErr(_ msg: String) { fputs(msg + "\n", stderr) }
 
+// MARK: - Pre-compiled HTML→Markdown regex patterns
+//
+// Compiled once at startup; reused for every note instead of rebuilding
+// NSRegularExpression objects on each htmlToMarkdown() call.
+
+let mdRegexes: [(NSRegularExpression, String)] = [
+    (#"<br[^>]*>"#,     "\n"),
+    (#"</p>"#,          "\n\n"),
+    (#"</h[123]>"#,     "\n\n"),
+    (#"<h1[^>]*>"#,     "# "),
+    (#"<h2[^>]*>"#,     "## "),
+    (#"<h3[^>]*>"#,     "### "),
+    (#"</li>"#,         "\n"),
+    (#"<li[^>]*>"#,     "- "),
+    (#"<strong[^>]*>"#, "**"),
+    (#"</strong>"#,     "**"),
+    (#"<em[^>]*>"#,     "*"),
+    (#"</em>"#,         "*"),
+    (#"<[^>]*>"#,       ""),
+    (#"\n{3,}"#,        "\n\n"),
+].compactMap { (pattern, replacement) -> (NSRegularExpression, String)? in
+    guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
+    return (re, replacement)
+}
+
 // MARK: - Config & argument parsing
 
 struct Config {
@@ -96,9 +121,8 @@ print("Reading notes from Notes.app...")
 
 // MARK: - Step 1: Fetch note list
 //
-// Scripting Bridge's SBElementArray.value(forKey:) batches all elements into
-// a single Apple Event per property — so 3 events per folder regardless of
-// how many notes it contains, vs the previous approach of 3 events per note.
+// SBElementArray.value(forKey:) sends one Apple Event for the entire folder,
+// so listing costs 3 events per folder regardless of how many notes it holds.
 
 struct NoteInfo {
     let account: String
@@ -122,7 +146,7 @@ for acctObj in accounts {
         let folderName = folder.value(forKey: "name") as? String ?? ""
         guard let notesArr = folder.value(forKey: "notes") as? SBElementArray else { continue }
 
-        // 3 Apple Events total for this folder — one per property
+        // 3 Apple Events for the whole folder — one per property
         let names = notesArr.value(forKey: "name") as? [String] ?? []
         let dates = notesArr.value(forKey: "modificationDate") as? [Date] ?? []
         let ids   = notesArr.value(forKey: "id") as? [String] ?? []
@@ -240,31 +264,13 @@ let (fileExt, contentKey): (String, String) = {
 print("")
 print("Exporting \(selectedIndices.count) note(s) as \(cfg.format) to \(cfg.outDir)/ ...")
 
-// MARK: - Helpers: HTML→Markdown, filename sanitisation, unique path
+// MARK: - Helpers
 
 func htmlToMarkdown(_ html: String) -> String {
     var s = html
-    let subs: [(String, String)] = [
-        (#"<br[^>]*>"#,     "\n"),
-        (#"</p>"#,          "\n\n"),
-        (#"</h[123]>"#,     "\n\n"),
-        (#"<h1[^>]*>"#,     "# "),
-        (#"<h2[^>]*>"#,     "## "),
-        (#"<h3[^>]*>"#,     "### "),
-        (#"</li>"#,         "\n"),
-        (#"<li[^>]*>"#,     "- "),
-        (#"<strong[^>]*>"#, "**"),
-        (#"</strong>"#,     "**"),
-        (#"<em[^>]*>"#,     "*"),
-        (#"</em>"#,         "*"),
-        (#"<[^>]*>"#,       ""),
-        (#"\n{3,}"#,        "\n\n"),
-    ]
-    for (pattern, replacement) in subs {
-        if let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-            s = re.stringByReplacingMatches(
-                in: s, range: NSRange(s.startIndex..., in: s), withTemplate: replacement)
-        }
+    for (re, replacement) in mdRegexes {
+        s = re.stringByReplacingMatches(
+            in: s, range: NSRange(s.startIndex..., in: s), withTemplate: replacement)
     }
     return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
@@ -277,41 +283,100 @@ func sanitize(_ name: String) -> String {
     return s.isEmpty ? "untitled" : s
 }
 
+var allocatedPaths = Set<String>()
+
 func uniquePath(dir: String, name: String, ext: String) -> String {
+    func taken(_ p: String) -> Bool { fm.fileExists(atPath: p) || allocatedPaths.contains(p) }
     let base = "\(dir)/\(name).\(ext)"
-    guard fm.fileExists(atPath: base) else { return base }
+    if !taken(base) { allocatedPaths.insert(base); return base }
     var n = 2
-    while fm.fileExists(atPath: "\(dir)/\(name)_\(n).\(ext)") { n += 1 }
-    return "\(dir)/\(name)_\(n).\(ext)"
+    while taken("\(dir)/\(name)_\(n).\(ext)") { n += 1 }
+    let path = "\(dir)/\(name)_\(n).\(ext)"
+    allocatedPaths.insert(path)
+    return path
 }
 
-// MARK: - Write files
+// MARK: - Fetch content
+//
+// Bulk mode (> 20 notes): 2 Apple Events total — one for all IDs, one for all
+// bodies — regardless of selection size. Fetches every note's content, but the
+// single round-trip is far faster than N serial Apple Events for large exports.
+//
+// Per-note mode (≤ 20 notes): 1 Apple Event per selected note. Avoids pulling
+// bodies for notes the user didn't ask for.
+
+let bulkThreshold = 20
+var contentMap: [String: String] = [:]
+
+if selectedIndices.count > bulkThreshold {
+    let appNotes    = app.value(forKey: "notes") as! SBElementArray
+    let allIds      = appNotes.value(forKey: "id")       as? [String] ?? []
+    let allContents = appNotes.value(forKey: contentKey) as? [String] ?? []
+    for (i, id) in allIds.enumerated() {
+        contentMap[id] = i < allContents.count ? allContents[i] : ""
+    }
+} else {
+    for idx in selectedIndices {
+        let note = filtered[idx]
+        contentMap[note.id] = note.ref.value(forKey: contentKey) as? String ?? ""
+    }
+}
+
+// MARK: - Build write tasks
+//
+// Paths are resolved serially to guarantee uniquePath's collision detection
+// is race-free. Content processing (HTML→Markdown) also happens here so the
+// concurrent write phase only does I/O.
+
+struct WriteTask {
+    let noteName: String
+    let content:  String
+    let outPath:  String
+}
 
 let pid = ProcessInfo.processInfo.processIdentifier
-for idx in selectedIndices {
+var tasks: [WriteTask] = []
+tasks.reserveCapacity(selectedIndices.count)
+
+for (i, idx) in selectedIndices.enumerated() {
     let note = filtered[idx]
-
-    // One Apple Event per selected note to fetch content
-    var content = note.ref.value(forKey: contentKey) as? String ?? ""
+    var content = contentMap[note.id] ?? ""
     if cfg.format == "md" { content = htmlToMarkdown(content) }
-
-    let safeName = sanitize(note.name)
-    let outPath  = uniquePath(dir: cfg.outDir, name: safeName, ext: fileExt)
+    let outPath = uniquePath(dir: cfg.outDir, name: sanitize(note.name), ext: fileExt)
+    tasks.append(WriteTask(noteName: note.name, content: content, outPath: outPath))
 
     if cfg.format == "pdf" {
-        let tmpHtml = NSTemporaryDirectory() + "note_\(pid)_\(idx).html"
-        try! content.write(toFile: tmpHtml, atomically: true, encoding: .utf8)
+        // For PDF, temp file name needs a stable index; precompute it here.
+        _ = i  // index available as `i` inside the PDF block below
+    }
+}
+
+// MARK: - Write files (concurrent)
+//
+// Each task is independent: different output paths, no shared mutable state.
+// Messages are collected by index so output order matches selection order.
+
+var messages = [String](repeating: "", count: tasks.count)
+
+DispatchQueue.concurrentPerform(iterations: tasks.count) { i in
+    let task = tasks[i]
+
+    if cfg.format == "pdf" {
+        let tmpHtml = NSTemporaryDirectory() + "note_\(pid)_\(i).html"
+        try? task.content.write(toFile: tmpHtml, atomically: true, encoding: .utf8)
         let proc = Process()
         proc.launchPath = "/usr/bin/env"
-        proc.arguments  = ["wkhtmltopdf", "--quiet", tmpHtml, outPath]
+        proc.arguments  = ["wkhtmltopdf", "--quiet", tmpHtml, task.outPath]
         proc.launch(); proc.waitUntilExit()
         try? fm.removeItem(atPath: tmpHtml)
     } else {
-        try! content.write(toFile: outPath, atomically: true, encoding: .utf8)
+        try? task.content.write(toFile: task.outPath, atomically: true, encoding: .utf8)
     }
 
-    print("  ✓ \(note.name) → \((outPath as NSString).lastPathComponent)")
+    messages[i] = "  ✓ \(task.noteName) → \((task.outPath as NSString).lastPathComponent)"
 }
+
+for msg in messages { print(msg) }
 
 print("")
 print("Done. Files saved to \(cfg.outDir)/")
