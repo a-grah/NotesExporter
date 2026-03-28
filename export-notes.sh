@@ -201,7 +201,7 @@ for idx in "${SELECTED[@]}"; do
     BATCH_IDS+=("${NOTE_IDS[$((idx-1))]}")
     raw_name="${NOTE_NAMES[$((idx-1))]}"
     BATCH_RAW_NAMES+=("$raw_name")
-    safe_name="${raw_name//[\/\\:*?"<>|]/_}"
+    safe_name="${raw_name//[\/\\:*?\"<>|]/_}"
     while [[ "$safe_name" == .* ]]; do safe_name="${safe_name#.}"; done
     safe_name="${safe_name:0:200}"
     [[ -z "$safe_name" ]] && safe_name="untitled"
@@ -213,7 +213,8 @@ done
 TMPIDS=$(mktemp /tmp/note_ids_XXXXXX.txt)
 printf '%s\n' "${BATCH_IDS[@]}" > "$TMPIDS"
 
-BATCH_CONTENT=$(osascript -l JavaScript - "$TMPIDS" "$BODY_FIELD" <<'ENDJS'
+TMPBATCH=$(mktemp /tmp/note_batch_XXXXXX.tmp)
+osascript -l JavaScript - "$TMPIDS" "$BODY_FIELD" <<'ENDJS' > "$TMPBATCH"
 ObjC.import('Foundation');
 const args  = $.NSProcessInfo.processInfo.arguments;
 const idsFile = ObjC.unwrap(args.objectAtIndex(4));
@@ -238,10 +239,11 @@ for (const noteId of noteIds) {
 }
 results.join("\x1e");
 ENDJS
-)
 rm -f "$TMPIDS"
 
-# Process and write each note; split BATCH_CONTENT on ASCII RS (0x1E)
+# Process and write each note; split on ASCII RS (0x1E) read from temp file
+# (Using < file instead of <<< "$var" avoids bash re-evaluating note content
+# as shell code, which breaks on notes containing $(...) or backtick sequences.)
 i=0
 while IFS= read -r -d $'\x1e' CONTENT || [[ -n "$CONTENT" ]]; do
     raw_name="${BATCH_RAW_NAMES[$i]}"
@@ -290,7 +292,8 @@ while IFS= read -r -d $'\x1e' CONTENT || [[ -n "$CONTENT" ]]; do
         echo "$CONTENT" > "$OUTFILE"
     fi
     echo "  ✓ $raw_name → $(basename "$OUTFILE")"
-done <<< "$BATCH_CONTENT"
+done < "$TMPBATCH"
+rm -f "$TMPBATCH"
 
 echo ""
 echo "Done. Files saved to $OUTDIR/"
