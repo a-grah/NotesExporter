@@ -1,5 +1,5 @@
 // export-notes.swift — Export selected notes from Apple Notes.app via Scripting Bridge
-// Build: swiftc -framework ScriptingBridge export-notes.swift -o export-notes
+// Build: make
 // Usage: ./export-notes [-f format] [-o outdir] [-a account] [-F folder] [-r regex]
 //
 // Formats: md (default), html, txt, pdf
@@ -62,6 +62,7 @@ func printUsage() {
       -a ACCOUNT  Filter by account name (e.g. "iCloud")
       -F FOLDER   Filter by folder name
       -r REGEX    Export notes whose title matches this regex (skips interactive selection)
+      -v          Show version and exit
       -h          Show this help
     """)
 }
@@ -82,6 +83,7 @@ while ai < argv.count {
     case "-a": cfg.account = next("-a")
     case "-F": cfg.folder  = next("-F")
     case "-r": cfg.regex   = next("-r")
+    case "-v", "--version": print("export-notes \(appVersion)"); exit(0)
     case "-h", "--help": printUsage(); exit(0)
     default:
         printErr("Unknown option: \(flag)")

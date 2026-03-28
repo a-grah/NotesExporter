@@ -12,6 +12,22 @@ OUTDIR="./exported-notes"
 ACCOUNT=""
 FOLDER=""
 REGEX=""
+VERSION="@VERSION@"
+
+show_version() {
+    local v="$VERSION"
+    if [[ "$v" == "@VERSION@" ]]; then
+        v=$(git describe --tags --long 2>/dev/null || echo "unknown")
+        v="${v#v}"
+    fi
+    echo "export-notes.sh $v"
+    exit 0
+}
+
+# Handle long options before getopts (which only supports short flags)
+for arg in "$@"; do
+    case "$arg" in --version) show_version ;; --help) usage ;; esac
+done
 
 usage() {
     cat <<EOF
@@ -23,18 +39,20 @@ Options:
   -a ACCOUNT  Filter by account name (e.g. "iCloud")
   -F FOLDER   Filter by folder name
   -r REGEX    Export notes whose title matches this regex (skips interactive selection)
+  -v          Show version
   -h          Show this help
 EOF
     exit 0
 }
 
-while getopts "f:o:a:F:r:h" opt; do
+while getopts "f:o:a:F:r:hv" opt; do
     case "$opt" in
         f) FORMAT="$OPTARG" ;;
         o) OUTDIR="$OPTARG" ;;
         a) ACCOUNT="$OPTARG" ;;
         F) FOLDER="$OPTARG" ;;
         r) REGEX="$OPTARG" ;;
+        v) show_version ;;
         h) usage ;;
         *) usage ;;
     esac

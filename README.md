@@ -25,8 +25,10 @@ Both versions fetch the list of all notes across every account and folder, let y
 ## Building the Swift version
 
 ```bash
-swiftc -framework ScriptingBridge export-notes.swift -o export-notes
+make
 ```
+
+The Makefile derives the version string from git tags (`git describe`) and compiles it into the binary. Run `make version` to see the current version without building.
 
 ## Usage
 
@@ -46,6 +48,7 @@ Both accept the same flags.
 | `-a ACCOUNT` | Filter by account name (e.g. `iCloud`) |
 | `-F FOLDER` | Filter by folder name |
 | `-r REGEX` | Export notes whose title matches a regex (skips interactive selection) |
+| `-v` | Show version |
 | `-h` | Show help |
 
 ### Examples
